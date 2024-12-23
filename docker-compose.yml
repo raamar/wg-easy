@@ -5,6 +5,10 @@ services:
     environment:
       - WG_HOST=${WG_HOST}
       - PASSWORD_HASH=${PASSWORD_HASH}
+      - WG_DEFAULT_ADDRESS=${WG_DEFAULT_ADDRESS}
+      - WG_ALLOWED_IP=${WG_ALLOWED_IP}
+      - UI_TRAFFIC_STATS=true
+      - UI_CHART_TYPE=1
     ports:
       - '51820:51820/udp'
       - '51821:51821/tcp'
