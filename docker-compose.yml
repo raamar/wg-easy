@@ -11,7 +11,7 @@ services:
       - UI_CHART_TYPE=1
     ports:
       - '51820:51820/udp'
-      - '51821:51821/tcp'
+      - '127.0.0.1:51821:51821/tcp'
     volumes:
       - wg-easy-data:/etc/wireguard
     restart: unless-stopped
