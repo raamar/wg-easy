@@ -2,51 +2,42 @@ SHELL := /bin/bash
 
 CONTAINER ?= wg-easy
 WG_IF     ?= wg0
-VPN_CIDR  ?= 172.16.0.0/24
 CHAIN     ?= WG_ISO
 WL_FILE   ?= whitelist.txt
 
-# Run a command inside the container (robust quoting):
-# IMPORTANT: pass RAW command text to $(call docker_sh, ...), WITHOUT wrapping it in quotes.
+# Run a command inside the container (pass RAW command text, no extra quotes)
 define docker_sh
 docker exec -i $(CONTAINER) sh -lc "$(1)"
 endef
 
-.PHONY: help status iso-on iso-off iso-rebuild wl-list wl-add wl-del wl-apply
+.PHONY: help status iso-on iso-off iso-rebuild wl-list wl-add wl-del wl-apply iso-check
 
 help:
 	@echo "Targets:"
-	@echo "  make status               - show current isolation status and chain rules"
+	@echo "  make status               - show isolation status (iptables only, no peers)"
 	@echo "  make iso-on               - enable client isolation (wg0->wg0 restricted)"
 	@echo "  make iso-off              - disable client isolation (remove chain/jump)"
 	@echo "  make wl-list              - show whitelist file"
 	@echo "  make wl-add IP=...        - add IP to whitelist file and apply"
 	@echo "  make wl-del IP=...        - remove IP from whitelist file and apply"
 	@echo "  make wl-apply             - apply whitelist to container (rebuild chain)"
+	@echo "  make iso-check            - verify jump/chain presence and show allowed IPs"
 	@echo ""
-	@echo "Vars (optional):"
-	@echo "  CONTAINER=$(CONTAINER)"
-	@echo "  WG_IF=$(WG_IF)"
-	@echo "  VPN_CIDR=$(VPN_CIDR)"
-	@echo "  CHAIN=$(CHAIN)"
-	@echo "  WL_FILE=$(WL_FILE)"
+	@echo "Vars (optional): CONTAINER=$(CONTAINER) WG_IF=$(WG_IF) CHAIN=$(CHAIN) WL_FILE=$(WL_FILE)"
 
+# Status without listing WG peers
 status:
 	@echo "== Container: $(CONTAINER) =="
 	@$(call docker_sh, \
-		printf '%s\n' '--- interfaces ---'; ip -br link; echo; \
-		printf '%s\n' '--- addresses ---'; ip -br addr; echo; \
-		printf '%s\n' '--- routes ---'; ip route; echo; \
-		printf '%s\n' '--- wg ---'; (wg show 2>/dev/null || true); echo; \
-		printf '%s\n' '--- iptables FORWARD ---'; iptables -S FORWARD; echo; \
-		printf '%s\n' '--- chain $(CHAIN) ---'; (iptables -S $(CHAIN) 2>/dev/null || printf '%s\n' 'chain not present') \
+		printf '%s\n' '--- interfaces (container) ---'; ip -br link; echo; \
+		printf '%s\n' '--- iptables policies ---'; iptables -S | sed -n '1,3p'; echo; \
+		printf '%s\n' '--- FORWARD rules ---'; iptables -S FORWARD; echo; \
+		printf '%s\n' '--- isolation chain: $(CHAIN) ---'; (iptables -S $(CHAIN) 2>/dev/null || printf '%s\n' 'chain not present') \
 	)
 
-# Enable isolation: create/rebuild chain + ensure FORWARD jump exists.
 iso-on: iso-rebuild
 	@echo "Isolation enabled."
 
-# Disable isolation completely: remove jump, flush+delete chain
 iso-off:
 	@echo "Disabling isolation..."
 	@$(call docker_sh, \
@@ -56,11 +47,7 @@ iso-off:
 	)
 	@echo "Isolation disabled."
 
-# Rebuild chain rules based on WL_FILE:
-# Only affects wg0->wg0 forwarding.
-#   1) allow ESTABLISHED/RELATED
-#   2) allow destinations in whitelist.txt
-#   3) drop everything else wg0->wg0 (client->client not in whitelist)
+# Rebuild chain rules based on WL_FILE (destination whitelist)
 iso-rebuild:
 	@echo "Rebuilding isolation rules from $(WL_FILE)..."
 	@[ -f "$(WL_FILE)" ] || (echo "ERROR: $(WL_FILE) not found. Create it first."; exit 1)
@@ -80,7 +67,7 @@ iso-rebuild:
 		iptables -A $(CHAIN) -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
 	)
 
-	@# 4) Add whitelist destination rules (host-side loop, apply inside container)
+	@# 4) Add whitelist destination rules
 	@set -euo pipefail; \
 	while IFS= read -r line; do \
 		raw="$${line}"; \
@@ -98,6 +85,20 @@ iso-rebuild:
 	@$(call docker_sh, iptables -A $(CHAIN) -j DROP)
 
 	@echo "Isolation rules rebuilt."
+
+# Shows only allowed destination IPs from the chain (what is effectively whitelisted)
+iso-check:
+	@echo "== Isolation check =="
+	@$(call docker_sh, \
+		printf '%s\n' 'Jump present? (FORWARD wg0->wg0 -> $(CHAIN))'; \
+		(iptables -C FORWARD -i $(WG_IF) -o $(WG_IF) -j $(CHAIN) 2>/dev/null && printf '%s\n' 'YES' || printf '%s\n' 'NO'); \
+		echo; \
+		printf '%s\n' 'Allowed destinations in $(CHAIN):'; \
+		(iptables -S $(CHAIN) 2>/dev/null | sed -n 's/^-A $(CHAIN) -d \\([0-9.]*\\)\\/32 -j ACCEPT$$/\\1/p' || true); \
+		echo; \
+		printf '%s\n' 'Chain tail (should end with DROP):'; \
+		(iptables -S $(CHAIN) 2>/dev/null | tail -n 5 || true) \
+	)
 
 wl-list:
 	@echo "== $(WL_FILE) =="
