@@ -6,8 +6,8 @@ VPN_CIDR  ?= 172.16.0.0/24
 CHAIN     ?= WG_ISO
 WL_FILE   ?= whitelist.txt
 
-# Run a command inside the container (robust quoting).
-# IMPORTANT: Always pass a single-line command in $(1). Use ';' to separate statements.
+# Run a command inside the container (robust quoting):
+# IMPORTANT: pass RAW command text to $(call docker_sh, ...), WITHOUT wrapping it in quotes.
 define docker_sh
 docker exec -i $(CONTAINER) sh -lc "$(1)"
 endef
@@ -33,12 +33,14 @@ help:
 
 status:
 	@echo "== Container: $(CONTAINER) =="
-	@$(call docker_sh, "printf '%s\n' '--- interfaces ---'; ip -br link; echo; \
+	@$(call docker_sh, \
+		printf '%s\n' '--- interfaces ---'; ip -br link; echo; \
 		printf '%s\n' '--- addresses ---'; ip -br addr; echo; \
 		printf '%s\n' '--- routes ---'; ip route; echo; \
 		printf '%s\n' '--- wg ---'; (wg show 2>/dev/null || true); echo; \
 		printf '%s\n' '--- iptables FORWARD ---'; iptables -S FORWARD; echo; \
-		printf '%s\n' '--- chain $(CHAIN) ---'; (iptables -S $(CHAIN) 2>/dev/null || printf '%s\n' 'chain not present')")
+		printf '%s\n' '--- chain $(CHAIN) ---'; (iptables -S $(CHAIN) 2>/dev/null || printf '%s\n' 'chain not present') \
+	)
 
 # Enable isolation: create/rebuild chain + ensure FORWARD jump exists.
 iso-on: iso-rebuild
@@ -47,30 +49,36 @@ iso-on: iso-rebuild
 # Disable isolation completely: remove jump, flush+delete chain
 iso-off:
 	@echo "Disabling isolation..."
-	@$(call docker_sh, "iptables -D FORWARD -i $(WG_IF) -o $(WG_IF) -j $(CHAIN) 2>/dev/null || true; \
+	@$(call docker_sh, \
+		iptables -D FORWARD -i $(WG_IF) -o $(WG_IF) -j $(CHAIN) 2>/dev/null || true; \
 		iptables -F $(CHAIN) 2>/dev/null || true; \
-		iptables -X $(CHAIN) 2>/dev/null || true")
+		iptables -X $(CHAIN) 2>/dev/null || true \
+	)
 	@echo "Isolation disabled."
 
 # Rebuild chain rules based on WL_FILE:
-# Logic (only affects wg0->wg0 forwarding):
+# Only affects wg0->wg0 forwarding.
 #   1) allow ESTABLISHED/RELATED
 #   2) allow destinations in whitelist.txt
-#   3) drop all other wg0->wg0 (client->client not in whitelist)
+#   3) drop everything else wg0->wg0 (client->client not in whitelist)
 iso-rebuild:
 	@echo "Rebuilding isolation rules from $(WL_FILE)..."
 	@[ -f "$(WL_FILE)" ] || (echo "ERROR: $(WL_FILE) not found. Create it first."; exit 1)
 
 	@# 1) Ensure chain exists
-	@$(call docker_sh, "iptables -N $(CHAIN) 2>/dev/null || true")
+	@$(call docker_sh, iptables -N $(CHAIN) 2>/dev/null || true)
 
 	@# 2) Ensure jump exists at the TOP for wg0->wg0 only
-	@$(call docker_sh, "iptables -C FORWARD -i $(WG_IF) -o $(WG_IF) -j $(CHAIN) 2>/dev/null || \
-		iptables -I FORWARD 1 -i $(WG_IF) -o $(WG_IF) -j $(CHAIN)")
+	@$(call docker_sh, \
+		iptables -C FORWARD -i $(WG_IF) -o $(WG_IF) -j $(CHAIN) 2>/dev/null || \
+		iptables -I FORWARD 1 -i $(WG_IF) -o $(WG_IF) -j $(CHAIN) \
+	)
 
 	@# 3) Flush chain and add base allow for established/related
-	@$(call docker_sh, "iptables -F $(CHAIN); \
-		iptables -A $(CHAIN) -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT")
+	@$(call docker_sh, \
+		iptables -F $(CHAIN); \
+		iptables -A $(CHAIN) -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+	)
 
 	@# 4) Add whitelist destination rules (host-side loop, apply inside container)
 	@set -euo pipefail; \
@@ -87,7 +95,7 @@ iso-rebuild:
 	done < "$(WL_FILE)"
 
 	@# 5) Final drop for all remaining wg0->wg0
-	@$(call docker_sh, "iptables -A $(CHAIN) -j DROP")
+	@$(call docker_sh, iptables -A $(CHAIN) -j DROP)
 
 	@echo "Isolation rules rebuilt."
 
